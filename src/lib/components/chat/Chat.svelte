@@ -3,6 +3,8 @@
 	import { toast } from 'svelte-sonner';
 	import mermaid from 'mermaid';
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
+	import MCPAuthChallengeModal from '$lib/components/mcp/MCPAuthChallengeModal.svelte';
+	import { MCPAuthHandler, type MCPAuthState } from '$lib/utils/mcp-auth-handler';
 
 	import { getContext, onDestroy, onMount, tick } from 'svelte';
 	const i18n: Writable<i18nType> = getContext('i18n');
@@ -75,7 +77,7 @@
 		getTaskIdsByChatId
 	} from '$lib/apis';
 	import { getTools } from '$lib/apis/tools';
-
+	
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
 	import Messages from '$lib/components/chat/Messages.svelte';
@@ -107,6 +109,18 @@
 	let navbarElement;
 
 	let showEventConfirmation = false;
+	
+	// MCP Authentication Challenge Modal
+	let mcpAuthState: MCPAuthState = {
+		showMCPAuthChallenge: false,
+		mcpAuthElicitationData: {}
+	};
+	const mcpAuthHandler = new MCPAuthHandler();
+	
+	// Debug reactive changes
+	$: {
+		console.log('MCP Auth State changed:', mcpAuthState);
+	}
 	let eventConfirmationTitle = '';
 	let eventConfirmationMessage = '';
 	let eventConfirmationInput = false;
@@ -244,6 +258,17 @@
 	const setToolIds = async () => {
 		if (!$tools) {
 			tools.set(await getTools(localStorage.token));
+
+			// Background refresh of MCP tools (non-blocking)
+			setTimeout(async () => {
+				try {
+					// Background MCP sync removed
+					// Refresh tools on demand only
+					tools.set(await getTools(localStorage.token));
+				} catch (e) {
+					console.error('Background MCP refresh failed:', e);
+				}
+			}, 1000);
 		}
 
 		if (selectedModels.length !== 1 && !atSelectedModel) {
@@ -302,7 +327,7 @@
 	const chatEventHandler = async (event, cb) => {
 		console.log(event);
 
-		if (event.chat_id === $chatId) {
+		if (!('chat_id' in event) || event.chat_id === $chatId) {
 			await tick();
 			let message = history.messages[event.message_id];
 
@@ -408,6 +433,23 @@
 					eventConfirmationMessage = data.message;
 					eventConfirmationInputPlaceholder = data.placeholder;
 					eventConfirmationInputValue = data?.value ?? '';
+				} else if (type === 'elicitation') {
+					// Handle MCP elicitation requests (including auth challenges)
+					console.log('Elicitation event received:', data);
+					console.log('Is auth challenge:', MCPAuthHandler.isAuthChallenge(data));
+					
+					// Preserve callback so we can trigger a retry after auth
+					eventCallback = cb;
+					
+					if (mcpAuthHandler.handleAuthChallenge(data, cb, mcpAuthState)) {
+						// Force Svelte to detect state change since we mutate object properties
+						mcpAuthState = { ...mcpAuthState };
+						console.log('MCP authentication challenge triggered, modal state:', mcpAuthState);
+					} else {
+						// Handle other elicitation types (future extensibility)
+						console.log('Unhandled elicitation request type:', data?.elicitation_type);
+						toast.info(`Elicitation request: ${data?.title || 'User input required'}`);
+					}
 				} else {
 					console.log('Unknown message type', data);
 				}
@@ -2173,6 +2215,25 @@
 		eventCallback(false);
 	}}
 />
+
+<MCPAuthChallengeModal
+	bind:show={mcpAuthState.showMCPAuthChallenge}
+	elicitationData={mcpAuthState.mcpAuthElicitationData}
+	on:authenticated={(e) => {
+		const retryContext = e?.detail?.retryContext;
+		if (retryContext) {
+			mcpAuthHandler.handleAuthSuccessWithRetry(mcpAuthState, retryContext);
+		} else {
+									mcpAuthHandler.handleAuthSuccess(mcpAuthState);
+					}
+					// Ensure UI updates after state changes
+					mcpAuthState = { ...mcpAuthState };
+				}}
+				on:cancelled={() => {
+					mcpAuthHandler.handleAuthCancel(mcpAuthState);
+					mcpAuthState = { ...mcpAuthState };
+				}}
+			/>
 
 <div
 	class="h-screen max-h-[100dvh] transition-width duration-200 ease-in-out {$showSidebar
